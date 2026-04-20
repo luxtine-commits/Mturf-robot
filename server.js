@@ -14,16 +14,7 @@ app.use((req, res, next) => {
 });
 
 const PORT = process.env.PORT || 10000;
-
-function candidateListingUrls(dateStr) {
-  return [
-    "https://www.zeturf.fr/fr/courses/" + dateStr,
-    "https://www.zeturf.fr/fr/programmes-et-pronostics/" + dateStr,
-    "https://www.zeturf.fr/fr/course-du-jour/" + dateStr,
-    "https://www.zeturf.fr/fr/programme-courses/" + dateStr,
-    "https://www.zeturf.fr/fr/programme/" + dateStr
-  ];
-}
+const BASE = "https://www.zeturf.fr";
 
 function clean(txt) {
   return String(txt || "").replace(/\s+/g, " ").trim();
@@ -38,18 +29,15 @@ async function fetchHtml(url) {
     },
     redirect: "follow"
   });
-  if (!res.ok) {
-    throw new Error("HTTP " + res.status + " sur " + url);
-  }
-  return await res.text();
+  if (!res.ok) throw new Error("HTTP " + res.status + " sur " + url);
+  return { html: await res.text(), finalUrl: res.url };
 }
 
 function parseArrivee(text) {
   const patterns = [
-    /Arriv[ée]e\s+officielle\s*:?\s*([0-9][0-9\s\-]+)/i,
-    /Arriv[ée]e\s+d[eé]finitive\s*:?\s*([0-9][0-9\s\-]+)/i,
-    /Arriv[ée]e\s*:?\s*([0-9][0-9\s\-]+)/i,
-    /Ordre\s+d['’]arriv[ée]e\s*:?\s*([0-9][0-9\s\-]+)/i
+    /Arriv[ée]e\s+officielle\s*[:\-]?\s*([0-9][0-9\s\-]+)/i,
+    /Arriv[ée]e\s+d[eé]finitive\s*[:\-]?\s*([0-9][0-9\s\-]+)/i,
+    /Arriv[ée]e\s*[:\-]?\s*([0-9][0-9\s\-]+)/i
   ];
   for (const p of patterns) {
     const m = text.match(p);
@@ -77,9 +65,8 @@ function extractCourseLinks($, dateStr) {
   $("a[href]").each(function () {
     let href = $(this).attr("href") || "";
     if (!href) return;
-    let abs = href;
-    if (href.startsWith("/")) abs = "https://www.zeturf.fr" + href;
-    if (abs.indexOf(dateStr) >= 0 && /\/R\d+C\d+-/i.test(abs)) {
+    let abs = href.startsWith("/") ? BASE + href : href;
+    if (abs.indexOf(dateStr) >= 0 && /\/course-du-jour\/.*\/R\d+C\d+-/i.test(abs)) {
       abs = abs.split("#")[0].split("?")[0];
       links.add(abs);
     }
@@ -87,39 +74,38 @@ function extractCourseLinks($, dateStr) {
   return Array.from(links).sort();
 }
 
-async function findCoursesOfDay(dateStr) {
-  const urls = candidateListingUrls(dateStr);
+// Brute force : essaye R1 à R15 et suit les redirections
+async function findCoursesByBruteForce(dateStr) {
+  const allLinks = new Set();
   const attempts = [];
-  let lastError = null;
-  for (const listingUrl of urls) {
+  for (let i = 1; i <= 15; i++) {
+    const url = BASE + "/fr/reunion-du-jour/" + dateStr + "/R" + i;
     try {
-      const html = await fetchHtml(listingUrl);
+      const { html, finalUrl } = await fetchHtml(url);
       const $ = cheerio.load(html);
       const found = extractCourseLinks($, dateStr);
       attempts.push({
-        url: listingUrl,
+        url: url,
+        finalUrl: finalUrl,
         status: "ok",
         htmlLength: html.length,
         linksFound: found.length
       });
-      if (found.length > 0) {
-        return { links: found, attempts: attempts };
-      }
+      found.forEach(function (l) { allLinks.add(l); });
     } catch (e) {
       attempts.push({
-        url: listingUrl,
+        url: url,
         status: "error",
         message: String(e.message || e)
       });
-      lastError = e;
     }
   }
-  return { links: [], attempts: attempts, lastError: lastError };
+  return { links: Array.from(allLinks).sort(), attempts: attempts };
 }
 
 async function parseOneCourse(url) {
   try {
-    const html = await fetchHtml(url);
+    const { html } = await fetchHtml(url);
     const $ = cheerio.load(html);
     const bodyText = clean($("body").text());
     const meta = parseMetaFromUrl(url) || {};
@@ -138,20 +124,18 @@ async function parseOneCourse(url) {
       arrivee_officielle: parseArrivee(bodyText)
     };
   } catch (e) {
-    return {
-      status: "error",
-      url: url,
-      message: String(e.message || e)
-    };
+    return { status: "error", url: url, message: String(e.message || e) };
   }
 }
+
+// ===================== ROUTES =====================
 
 app.get("/", function (req, res) {
   res.json({
     status: "ok",
     message: "MTURF Robot OK",
     time: new Date().toISOString(),
-    version: "v2-debug"
+    version: "v3-bruteforce"
   });
 });
 
@@ -165,19 +149,7 @@ app.get("/zeturf/jour", async function (req, res) {
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res.status(400).json({ status: "error", message: "Date invalide, format YYYY-MM-DD" });
     }
-    const listing = await findCoursesOfDay(date);
-    if (!listing.links || listing.links.length === 0) {
-      return res.json({
-        status: "ok",
-        date: date,
-        total: 0,
-        courses: [],
-        debug: {
-          message: "Aucune course trouvée sur les URLs de listing",
-          attempts: listing.attempts
-        }
-      });
-    }
+    const listing = await findCoursesByBruteForce(date);
     const results = [];
     for (const url of listing.links) {
       const parsed = await parseOneCourse(url);
@@ -193,8 +165,7 @@ app.get("/zeturf/jour", async function (req, res) {
   } catch (err) {
     res.status(500).json({
       status: "error",
-      message: String(err.message || err),
-      stack: String(err.stack || "").split("\n").slice(0, 5).join(" | ")
+      message: String(err.message || err)
     });
   }
 });
@@ -205,12 +176,12 @@ app.get("/debug/listing", async function (req, res) {
     return res.status(400).json({ status: "error", message: "date YYYY-MM-DD requise" });
   }
   try {
-    const listing = await findCoursesOfDay(date);
+    const listing = await findCoursesByBruteForce(date);
     res.json({
       status: "ok",
       date: date,
       totalLinks: listing.links.length,
-      firstLinks: listing.links.slice(0, 10),
+      firstLinks: listing.links.slice(0, 20),
       attempts: listing.attempts
     });
   } catch (err) {
@@ -222,7 +193,7 @@ app.get("/debug/fetch", async function (req, res) {
   const url = req.query.url;
   if (!url) return res.status(400).json({ status: "error", message: "url requise" });
   try {
-    const html = await fetchHtml(url);
+    const { html, finalUrl } = await fetchHtml(url);
     const $ = cheerio.load(html);
     const title = clean($("title").text());
     const bodyText = clean($("body").text());
@@ -230,6 +201,7 @@ app.get("/debug/fetch", async function (req, res) {
     res.json({
       status: "ok",
       url: url,
+      finalUrl: finalUrl,
       htmlLength: html.length,
       title: title,
       arrivee_detectee: arrivee,
