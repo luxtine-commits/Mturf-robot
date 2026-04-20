@@ -5,7 +5,7 @@ const cheerio = require("cheerio");
 const app = express();
 app.use(express.json());
 
-// === CORS — autorise les appels depuis n'importe quel domaine
+// === CORS — autorise les appels depuis n'importe quel domaine (Netlify, iPad, etc.)
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -48,7 +48,10 @@ function parseCourseMetaFromUrl(url) {
 
 async function fetchHtml(url) {
   const res = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0", "Accept-Language": "fr-FR,fr;q=0.9" },
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      "Accept-Language": "fr-FR,fr;q=0.9"
+    },
     timeout: 15000
   });
   if (!res.ok) throw new Error("HTTP " + res.status + " sur " + url);
@@ -60,22 +63,31 @@ async function parseOneCourse(url) {
   const $ = cheerio.load(html);
   const bodyText = clean($("body").text());
   const meta = parseCourseMetaFromUrl(url);
+
   let hippodrome = "", nom_course = "", heure = "", distance = "", allocation = "", partants = "", arrivee_officielle = "";
+
   const h1 = clean($("h1").first().text());
   if (h1) nom_course = h1;
+
   const hourMatch = bodyText.match(/\b(\d{1,2}h\d{2})\b/);
   if (hourMatch) heure = hourMatch[1];
+
   const distMatch = bodyText.match(/\b(\d{3,4}m)\b/i);
   if (distMatch) distance = distMatch[1];
+
   const allocMatch = bodyText.match(/(\d[\d\s]*€)/);
   if (allocMatch) allocation = clean(allocMatch[1]);
+
   const partMatch = bodyText.match(/(\d+)\s+Partants/i) || bodyText.match(/Partants\s*:?\s*(\d+)/i);
   if (partMatch) partants = partMatch[1];
+
   arrivee_officielle = parseArrivalFromBody(bodyText);
+
   if (meta.slug) {
     const slugParts = meta.slug.split("-");
     if (slugParts.length > 1) hippodrome = slugParts[0].toUpperCase();
   }
+
   return {
     status: "ok", url,
     reunion: meta.reunion || "", course: meta.course || "",
@@ -116,10 +128,12 @@ async function findCoursesOfDay(dateStr) {
   return uniqBy(links, x => x).sort();
 }
 
+// === Endpoint racine pour réveiller Render (ping)
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "MTURF Robot OK", time: new Date().toISOString() });
 });
 
+// === Endpoint ping léger pour pré-réveiller le serveur sans appel lourd
 app.get("/ping", (req, res) => {
   res.json({ status: "ok", awake: true });
 });
