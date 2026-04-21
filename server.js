@@ -1,257 +1,251 @@
-const express = require("express");
-const fetch = require("node-fetch");
-const cheerio = require("cheerio");
+const express = require(“express”);
+const fetch = require(“node-fetch”);
+const cheerio = require(“cheerio”);
 
 const app = express();
 
 app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
+res.setHeader(“Access-Control-Allow-Origin”, “*”);
+res.setHeader(“Access-Control-Allow-Methods”, “GET, POST, OPTIONS”);
+res.setHeader(“Access-Control-Allow-Headers”, “Content-Type, Authorization”);
+if (req.method === “OPTIONS”) return res.sendStatus(200);
+next();
 });
 
 const PORT = process.env.PORT || 10000;
-const BASE = "https://www.zeturf.fr";
+const BASE = “https://www.zeturf.fr”;
 
 function clean(txt) {
-  return String(txt || "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
+return String(txt || “”).replace(/\u00A0/g, “ “).replace(/\s+/g, “ “).trim();
 }
 
 function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
 async function fetchHtml(url) {
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8"
-    },
-    redirect: "follow"
-  });
-  if (!res.ok) throw new Error("HTTP " + res.status + " sur " + url);
-  return await res.text();
+const res = await fetch(url, {
+headers: {
+“User-Agent”: “Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15”,
+“Accept”: “text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8”,
+“Accept-Language”: “fr-FR,fr;q=0.9,en;q=0.8”
+},
+redirect: “follow”
+});
+if (!res.ok) throw new Error(“HTTP “ + res.status + “ sur “ + url);
+return await res.text();
 }
 
 function parseEuro(str) {
-  if (!str) return 0;
-  const s = String(str).replace(/[€\s\u00A0]/g, "").replace(",", ".");
-  const n = parseFloat(s);
-  return isNaN(n) ? 0 : n;
+if (!str) return 0;
+const s = String(str).replace(/[€\s\u00A0]/g, “”).replace(”,”, “.”);
+const n = parseFloat(s);
+return isNaN(n) ? 0 : n;
 }
 
 function extractArriveesFromReunionPage(html) {
-  const $ = cheerio.load(html);
-  const out = [];
-  $("tr").each(function () {
-    const txt = clean($(this).text());
-    const cMatch = txt.match(/\bC(\d+)\b/);
-    const aMatch = txt.match(/Arriv[ée]e\s*officielle\s*[:\-]?\s*([0-9][0-9\s\-]+)/i);
-    if (cMatch && aMatch) {
-      const arrStr = clean(aMatch[1]);
-      if (arrStr.indexOf("-") >= 0) out.push({ course: "C" + cMatch[1], arrivee_officielle: arrStr });
-    }
-  });
-  if (out.length === 0) {
-    const body = clean($("body").text());
-    const re = /\bC(\d+)\b[^A-Za-z]{0,200}Arriv[ée]e\s*officielle\s*[:\-]?\s*([0-9][0-9\s\-]+)/gi;
-    let m;
-    while ((m = re.exec(body)) !== null) {
-      const arrStr = clean(m[2]);
-      if (arrStr.indexOf("-") >= 0) out.push({ course: "C" + m[1], arrivee_officielle: arrStr });
-    }
-  }
-  return out;
+const $ = cheerio.load(html);
+const out = [];
+$(“tr”).each(function () {
+const txt = clean($(this).text());
+const cMatch = txt.match(/\bC(\d+)\b/);
+const aMatch = txt.match(/Arriv[ée]e\s*officielle\s*[:-]?\s*([0-9][0-9\s-]+)/i);
+if (cMatch && aMatch) {
+const arrStr = clean(aMatch[1]);
+if (arrStr.indexOf(”-”) >= 0) out.push({ course: “C” + cMatch[1], arrivee_officielle: arrStr });
+}
+});
+if (out.length === 0) {
+const body = clean($(“body”).text());
+const re = /\bC(\d+)\b[^A-Za-z]{0,200}Arriv[ée]e\s*officielle\s*[:-]?\s*([0-9][0-9\s-]+)/gi;
+let m;
+while ((m = re.exec(body)) !== null) {
+const arrStr = clean(m[2]);
+if (arrStr.indexOf(”-”) >= 0) out.push({ course: “C” + m[1], arrivee_officielle: arrStr });
+}
+}
+return out;
 }
 
-// CORRIGÉ : filtre les liens par numéro de réunion
 function extractCourseLinksFromReunionPage(html, dateStr, reunionNum) {
-  const $ = cheerio.load(html);
-  const map = {};
-  // reunionNum = "R2" par exemple — on ne prend QUE les liens R2Cx
-  const reunionPattern = new RegExp("/" + reunionNum + "C(\\d+)-", "i");
-  $("a[href]").each(function () {
-    let href = $(this).attr("href") || "";
-    if (!href) return;
-    let abs = href.startsWith("/") ? BASE + href : href;
-    if (abs.indexOf(dateStr) < 0) return;
-    const m = abs.match(reunionPattern);
-    if (!m) return;
-    abs = abs.split("#")[0].split("?")[0];
-    const ckey = "C" + m[1];
-    if (!map[ckey]) map[ckey] = abs;
-  });
-  return map;
+const $ = cheerio.load(html);
+const map = {};
+const reunionPattern = new RegExp(”/” + reunionNum + “C(\d+)-”, “i”);
+$(“a[href]”).each(function () {
+let href = $(this).attr(“href”) || “”;
+if (!href) return;
+let abs = href.startsWith(”/”) ? BASE + href : href;
+if (abs.indexOf(dateStr) < 0) return;
+const m = abs.match(reunionPattern);
+if (!m) return;
+abs = abs.split(”#”)[0].split(”?”)[0];
+const ckey = “C” + m[1];
+if (!map[ckey]) map[ckey] = abs;
+});
+return map;
 }
 
-// NOUVELLE VERSION : cherche les sections avec labels (SIMPLE GAGNANT, SIMPLE PLACÉ, etc.)
+// v7.1 : cherche la ZONE APRES le dernier “RAPPORTS” qui contient des montants
 function extractRapportsFromCoursePage(html, arriveeStr) {
-  const $ = cheerio.load(html);
-  const body = clean($("body").text());
-  const result = {
-    rapG: 0, rapZS: 0, rapZC: 0,
-    _arrivee: arriveeStr || "",
-    _matched: false,
-    _sections: {}
-  };
+const $ = cheerio.load(html);
+const body = clean($(“body”).text());
+const result = {
+rapG: 0, rapZS: 0, rapZC: 0,
+_arrivee: arriveeStr || “”,
+_matched: false,
+_debug: {}
+};
 
-  const arrNums = String(arriveeStr || "")
-    .split(/[-–—]/)
-    .map(function (x) { return parseInt(String(x).trim()); })
-    .filter(function (n) { return n > 0; });
-  result._arrNums = arrNums;
+const arrNums = String(arriveeStr || “”)
+.split(/[-–—]/)
+.map(function (x) { return parseInt(String(x).trim()); })
+.filter(function (n) { return n > 0; });
+result._arrNums = arrNums;
 
-  // Chercher un numéro + montant € dans une section donnée
-  function findAmount(sectionText, num) {
-    if (!num) return 0;
-    // On cherche un numéro isolé suivi (avec peu de caractères entre) d'un montant €
-    const re = new RegExp("(?:^|[^0-9])" + num + "(?:[^0-9€]{1,40})(\\d+[.,]\\d{1,2})\\s*€", "i");
-    const m = sectionText.match(re);
-    return m ? parseEuro(m[1]) : 0;
-  }
+let zoneStart = -1;
+const rapportsRe = /RAPPORTS/gi;
+let rapMatch;
+while ((rapMatch = rapportsRe.exec(body)) !== null) {
+const snippet = body.slice(rapMatch.index, rapMatch.index + 2000);
+const euros = (snippet.match(/\d+[.,]\d+\s*€/g) || []).length;
+if (euros >= 2) {
+zoneStart = rapMatch.index;
+}
+}
 
-  // Extraire une section : 800 caractères après le label
-  function getSection(label) {
-    const re = new RegExp(label + "[\\s\\S]{0,800}", "i");
-    const m = body.match(re);
-    return m ? m[0] : "";
-  }
+result._debug.rapportsZoneStart = zoneStart;
+if (zoneStart < 0) return result;
 
-  // SIMPLE GAGNANT -> rapG pour le 1er cheval
-  const sgSection = getSection("SIMPLE\\s+GAGNANT");
-  result._sections.sg = sgSection.slice(0, 200);
-  if (sgSection && arrNums[0]) {
-    const v = findAmount(sgSection, arrNums[0]);
-    if (v > 0) { result.rapG = v; result._matched = true; }
-  }
+const zone = body.slice(zoneStart, zoneStart + 5000);
+result._debug.zonePreview = zone.slice(0, 400);
 
-  // SIMPLE PLACÉ -> rapZS pour le 2e cheval, rapZC pour le 4e
-  const spSection = getSection("SIMPLE\\s+PLAC[ÉE]");
-  result._sections.sp = spSection.slice(0, 200);
-  if (spSection) {
-    if (arrNums[1]) result.rapZS = findAmount(spSection, arrNums[1]);
-    if (arrNums[3]) result.rapZC = findAmount(spSection, arrNums[3]);
-  }
+function extractSubSection(zoneText, label, nextLabels) {
+const startRe = new RegExp(label, “i”);
+const sm = zoneText.match(startRe);
+if (!sm) return “”;
+const start = sm.index + sm[0].length;
+let end = zoneText.length;
+for (const nl of nextLabels) {
+const nr = new RegExp(nl, “i”);
+const nm = zoneText.slice(start).match(nr);
+if (nm && nm.index < end - start) end = start + nm.index;
+}
+return zoneText.slice(start, end);
+}
 
-  return result;
+const sgSection = extractSubSection(zone, “SIMPLE\s+GAGNANT”, [“SIMPLE\s+PLAC[ÉE]”, “ZESHOW”, “ZE\s*SHOW”, “JUMEL”, “TRI”, “QUART”, “QUINT”, “COUPL”]);
+const spSection = extractSubSection(zone, “SIMPLE\s+PLAC[ÉE]”, [“ZESHOW”, “ZE\s*SHOW”, “JUMEL”, “TRI”, “QUART”, “QUINT”, “COUPL”]);
+
+result._debug.sgSection = sgSection.slice(0, 200);
+result._debug.spSection = spSection.slice(0, 200);
+
+function findAmount(sectionText, num) {
+if (!num || !sectionText) return 0;
+const re = new RegExp(”(?:^|[^0-9])” + num + “(?:[^0-9€]{1,40})(\d+[.,]\d{1,2})\s*€”, “i”);
+const m = sectionText.match(re);
+return m ? parseEuro(m[1]) : 0;
+}
+
+if (sgSection && arrNums[0]) {
+const v = findAmount(sgSection, arrNums[0]);
+if (v > 0) { result.rapG = v; result._matched = true; }
+}
+
+if (spSection && arrNums[1]) {
+result.rapZS = findAmount(spSection, arrNums[1]);
+}
+
+if (spSection && arrNums[2]) {
+result.rapZC = findAmount(spSection, arrNums[2]);
+}
+
+return result;
 }
 
 // ===================== ROUTES =====================
 
-app.get("/", function (req, res) {
-  res.json({ status: "ok", message: "MTURF Robot OK", time: new Date().toISOString(), version: "v7.0-rapports-fixed" });
+app.get(”/”, function (req, res) {
+res.json({ status: “ok”, message: “MTURF Robot OK”, time: new Date().toISOString(), version: “v7.1-zone-rapports” });
 });
 
-app.get("/ping", function (req, res) {
-  res.json({ status: "ok", awake: true });
+app.get(”/ping”, function (req, res) {
+res.json({ status: “ok”, awake: true });
 });
 
-app.get("/zeturf/jour", async function (req, res) {
-  try {
-    const date = req.query.date;
-    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res.status(400).json({ status: "error", message: "Date invalide" });
-    }
-    const reunionsParam = req.query.reunions || "";
-    const wantRapports = req.query.rapports === "1" || req.query.rapports === "true";
-    if (!reunionsParam) return res.json({ status: "ok", date: date, total: 0, courses: [] });
-    const reunionSlugs = reunionsParam.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
-    const allCourses = [];
-    for (const slug of reunionSlugs) {
-      const reunionUrl = BASE + "/fr/reunion-du-jour/" + date + "/" + slug;
-      try {
-        const html = await fetchHtml(reunionUrl);
-        const arrivees = extractArriveesFromReunionPage(html);
-        const rMatch = slug.match(/^(R\d+)/i);
-        const reunion = rMatch ? rMatch[1].toUpperCase() : "";
-        const courseLinks = extractCourseLinksFromReunionPage(html, date, reunion);
-        const hippo = slug.replace(/^R\d+-?/i, "").toUpperCase();
-        for (const a of arrivees) {
-          const c = { status: "ok", date: date, reunion: reunion, course: a.course, hippodrome: hippo, arrivee_officielle: a.arrivee_officielle, rapG: 0, rapZS: 0, rapZC: 0 };
-          if (wantRapports && courseLinks[a.course]) {
-            try {
-              await sleep(300);
-              const cHtml = await fetchHtml(courseLinks[a.course]);
-              const rap = extractRapportsFromCoursePage(cHtml, a.arrivee_officielle);
-              c.rapG = rap.rapG; c.rapZS = rap.rapZS; c.rapZC = rap.rapZC;
-            } catch (e) { c.rapportsError = String(e.message || e); }
-          }
-          allCourses.push(c);
-        }
-      } catch (e) {}
-    }
-    res.json({ status: "ok", date: date, total: allCourses.length, withRapports: wantRapports, courses: allCourses });
-  } catch (err) {
-    res.status(500).json({ status: "error", message: String(err.message || err) });
-  }
+app.get(”/zeturf/jour”, async function (req, res) {
+try {
+const date = req.query.date;
+if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+return res.status(400).json({ status: “error”, message: “Date invalide” });
+}
+const reunionsParam = req.query.reunions || “”;
+const wantRapports = req.query.rapports === “1” || req.query.rapports === “true”;
+if (!reunionsParam) return res.json({ status: “ok”, date: date, total: 0, courses: [] });
+const reunionSlugs = reunionsParam.split(”,”).map(function (s) { return s.trim(); }).filter(Boolean);
+const allCourses = [];
+for (const slug of reunionSlugs) {
+const reunionUrl = BASE + “/fr/reunion-du-jour/” + date + “/” + slug;
+try {
+const html = await fetchHtml(reunionUrl);
+const arrivees = extractArriveesFromReunionPage(html);
+const rMatch = slug.match(/^(R\d+)/i);
+const reunion = rMatch ? rMatch[1].toUpperCase() : “”;
+const courseLinks = extractCourseLinksFromReunionPage(html, date, reunion);
+const hippo = slug.replace(/^R\d+-?/i, “”).toUpperCase();
+for (const a of arrivees) {
+const c = { status: “ok”, date: date, reunion: reunion, course: a.course, hippodrome: hippo, arrivee_officielle: a.arrivee_officielle, rapG: 0, rapZS: 0, rapZC: 0 };
+if (wantRapports && courseLinks[a.course]) {
+try {
+await sleep(300);
+const cHtml = await fetchHtml(courseLinks[a.course]);
+const rap = extractRapportsFromCoursePage(cHtml, a.arrivee_officielle);
+c.rapG = rap.rapG; c.rapZS = rap.rapZS; c.rapZC = rap.rapZC;
+} catch (e) { c.rapportsError = String(e.message || e); }
+}
+allCourses.push(c);
+}
+} catch (e) {}
+}
+res.json({ status: “ok”, date: date, total: allCourses.length, withRapports: wantRapports, courses: allCourses });
+} catch (err) {
+res.status(500).json({ status: “error”, message: String(err.message || err) });
+}
 });
 
-app.get("/debug/reunion", async function (req, res) {
-  const date = req.query.date;
-  const slug = req.query.slug;
-  if (!date || !slug) return res.status(400).json({ status: "error" });
-  const url = BASE + "/fr/reunion-du-jour/" + date + "/" + slug;
-  try {
-    const html = await fetchHtml(url);
-    const rMatch = slug.match(/^(R\d+)/i);
-    const reunion = rMatch ? rMatch[1].toUpperCase() : "";
-    res.json({
-      status: "ok",
-      url: url,
-      reunion: reunion,
-      arrivees: extractArriveesFromReunionPage(html),
-      courseLinks: extractCourseLinksFromReunionPage(html, date, reunion)
-    });
-  } catch (err) {
-    res.status(500).json({ status: "error", message: String(err.message || err) });
-  }
+app.get(”/debug/reunion”, async function (req, res) {
+const date = req.query.date;
+const slug = req.query.slug;
+if (!date || !slug) return res.status(400).json({ status: “error” });
+const url = BASE + “/fr/reunion-du-jour/” + date + “/” + slug;
+try {
+const html = await fetchHtml(url);
+const rMatch = slug.match(/^(R\d+)/i);
+const reunion = rMatch ? rMatch[1].toUpperCase() : “”;
+res.json({
+status: “ok”,
+url: url,
+reunion: reunion,
+arrivees: extractArriveesFromReunionPage(html),
+courseLinks: extractCourseLinksFromReunionPage(html, date, reunion)
+});
+} catch (err) {
+res.status(500).json({ status: “error”, message: String(err.message || err) });
+}
 });
 
-app.get("/debug/course", async function (req, res) {
-  const date = req.query.date;
-  const slug = req.query.slug;
-  const arr = req.query.arrivee || "";
-  if (!date || !slug) return res.status(400).json({ status: "error" });
-  const url = BASE + "/fr/course-du-jour/" + date + "/" + slug;
-  try {
-    const html = await fetchHtml(url);
-    const rap = extractRapportsFromCoursePage(html, arr);
-    res.json({ status: "ok", url: url, htmlLength: html.length, rapports: rap });
-  } catch (err) {
-    res.status(500).json({ status: "error", message: String(err.message || err) });
-  }
-});
-
-// Debug ciblé : montre le HTML autour de la zone RAPPORTS
-app.get("/debug/rapports", async function (req, res) {
-  const date = req.query.date;
-  const slug = req.query.slug;
-  if (!date || !slug) return res.status(400).json({ status: "error", message: "date et slug requis" });
-  const url = BASE + "/fr/course-du-jour/" + date + "/" + slug;
-  try {
-    const html = await fetchHtml(url);
-    const $ = cheerio.load(html);
-    const body = clean($("body").text());
-    const idx = body.search(/RAPPORTS/i);
-    const sgIdx = body.search(/SIMPLE\s+GAGNANT/i);
-    const spIdx = body.search(/SIMPLE\s+PLAC[ÉE]/i);
-    res.json({
-      status: "ok",
-      url: url,
-      bodyLength: body.length,
-      rapportsFoundAt: idx,
-      simpleGagnantFoundAt: sgIdx,
-      simplePlaceFoundAt: spIdx,
-      textAroundRapports: idx >= 0 ? body.slice(idx, idx + 1500) : null,
-      textAroundSG: sgIdx >= 0 ? body.slice(sgIdx, sgIdx + 800) : null,
-      textAroundSP: spIdx >= 0 ? body.slice(spIdx, spIdx + 800) : null
-    });
-  } catch (err) {
-    res.status(500).json({ status: "error", message: String(err.message || err) });
-  }
+app.get(”/debug/course”, async function (req, res) {
+const date = req.query.date;
+const slug = req.query.slug;
+const arr = req.query.arrivee || “”;
+if (!date || !slug) return res.status(400).json({ status: “error” });
+const url = BASE + “/fr/course-du-jour/” + date + “/” + slug;
+try {
+const html = await fetchHtml(url);
+const rap = extractRapportsFromCoursePage(html, arr);
+res.json({ status: “ok”, url: url, htmlLength: html.length, rapports: rap });
+} catch (err) {
+res.status(500).json({ status: “error”, message: String(err.message || err) });
+}
 });
 
 app.listen(PORT, function () {
-  console.log("Server running on " + PORT);
+console.log(“Server running on “ + PORT);
 });
