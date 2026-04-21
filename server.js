@@ -83,7 +83,10 @@ function extractCourseLinksFromReunionPage(html, dateStr, reunionNum) {
   return map;
 }
 
-// v7.1 : cherche la ZONE APRES le dernier "RAPPORTS" qui contient des montants
+// v7.3 : attribution finale
+// rapG = Simple Gagnant (1er montant du 1er cheval)
+// rapZS = ZEshow (1er montant du 2e cheval)
+// rapZC = Simple Place du 4e cheval (dernier montant, souvent 0)
 function extractRapportsFromCoursePage(html, arriveeStr) {
   const $ = cheerio.load(html);
   const body = clean($("body").text());
@@ -100,61 +103,64 @@ function extractRapportsFromCoursePage(html, arriveeStr) {
     .filter(function (n) { return n > 0; });
   result._arrNums = arrNums;
 
+  // Trouver la zone RAPPORTS
   let zoneStart = -1;
   const rapportsRe = /RAPPORTS/gi;
   let rapMatch;
   while ((rapMatch = rapportsRe.exec(body)) !== null) {
     const snippet = body.slice(rapMatch.index, rapMatch.index + 2000);
     const euros = (snippet.match(/\d+[.,]\d+\s*€/g) || []).length;
-    if (euros >= 2) {
-      zoneStart = rapMatch.index;
-    }
+    if (euros >= 2) zoneStart = rapMatch.index;
   }
-
   result._debug.rapportsZoneStart = zoneStart;
   if (zoneStart < 0) return result;
 
   const zone = body.slice(zoneStart, zoneStart + 5000);
-  result._debug.zonePreview = zone.slice(0, 400);
 
-  function extractSubSection(zoneText, label, nextLabels) {
-    const startRe = new RegExp(label, "i");
-    const sm = zoneText.match(startRe);
-    if (!sm) return "";
-    const start = sm.index + sm[0].length;
-    let end = zoneText.length;
-    for (const nl of nextLabels) {
-      const nr = new RegExp(nl, "i");
-      const nm = zoneText.slice(start).match(nr);
-      if (nm && nm.index < end - start) end = start + nm.index;
-    }
-    return zoneText.slice(start, end);
+  // Isoler la section SIMPLE (entre "Simple placé" et le prochain label)
+  const spStartMatch = zone.match(/Simple\s+plac[ée]/i);
+  if (!spStartMatch) {
+    result._debug.error = "Simple place label not found";
+    return result;
   }
+  const simpleStart = spStartMatch.index + spStartMatch[0].length;
+  const endLabels = /Jumel|Triordre|ZE4|Coupl|Quart|Quint/i;
+  const afterSimple = zone.slice(simpleStart);
+  const endMatch = afterSimple.match(endLabels);
+  const simpleEnd = endMatch ? simpleStart + endMatch.index : simpleStart + 500;
 
-  const sgSection = extractSubSection(zone, "SIMPLE\\s+GAGNANT", ["SIMPLE\\s+PLAC[ÉE]", "ZESHOW", "ZE\\s*SHOW", "JUMEL", "TRI", "QUART", "QUINT", "COUPL"]);
-  const spSection = extractSubSection(zone, "SIMPLE\\s+PLAC[ÉE]", ["ZESHOW", "ZE\\s*SHOW", "JUMEL", "TRI", "QUART", "QUINT", "COUPL"]);
+  const simpleZone = zone.slice(simpleStart, simpleEnd);
+  result._debug.simpleZone = simpleZone;
 
-  result._debug.sgSection = sgSection.slice(0, 200);
-  result._debug.spSection = spSection.slice(0, 200);
-
-  function findAmount(sectionText, num) {
-    if (!num || !sectionText) return 0;
-    const re = new RegExp("(?:^|[^0-9])" + num + "(?:[^0-9€]{1,40})(\\d+[.,]\\d{1,2})\\s*€", "i");
-    const m = sectionText.match(re);
-    return m ? parseEuro(m[1]) : 0;
+  // Extraire les lignes du tableau : num + liste de montants
+  const lineRe = /(\d{1,2})\s+((?:\d+[.,]\d+\s*€\s*)+)/g;
+  const chevalData = {};
+  let lm;
+  while ((lm = lineRe.exec(simpleZone)) !== null) {
+    const num = parseInt(lm[1]);
+    if (!num || num > 25) continue;
+    const montants = [];
+    const vr = /(\d+[.,]\d+)\s*€/g;
+    let vm;
+    while ((vm = vr.exec(lm[2])) !== null) montants.push(parseEuro(vm[1]));
+    if (montants.length > 0) chevalData[num] = montants;
   }
+  result._debug.chevalData = chevalData;
 
-  if (sgSection && arrNums[0]) {
-    const v = findAmount(sgSection, arrNums[0]);
-    if (v > 0) { result.rapG = v; result._matched = true; }
+  // ATTRIBUTION (selon preferences user)
+  // rapG : Simple Gagnant = 1er montant du 1er cheval
+  if (arrNums[0] && chevalData[arrNums[0]]) {
+    result.rapG = chevalData[arrNums[0]][0];
+    result._matched = true;
   }
-
-  if (spSection && arrNums[1]) {
-    result.rapZS = findAmount(spSection, arrNums[1]);
+  // rapZS : ZEshow = 1er montant du 2e cheval
+  if (arrNums[1] && chevalData[arrNums[1]]) {
+    result.rapZS = chevalData[arrNums[1]][0];
   }
-
-  if (spSection && arrNums[2]) {
-    result.rapZC = findAmount(spSection, arrNums[2]);
+  // rapZC : Simple Place du 4e cheval = dernier montant (souvent absent)
+  if (arrNums[3] && chevalData[arrNums[3]]) {
+    const m = chevalData[arrNums[3]];
+    result.rapZC = m[m.length - 1];
   }
 
   return result;
@@ -163,7 +169,7 @@ function extractRapportsFromCoursePage(html, arriveeStr) {
 // ===================== ROUTES =====================
 
 app.get("/", function (req, res) {
-  res.json({ status: "ok", message: "MTURF Robot OK", time: new Date().toISOString(), version: "v7.1-zone-rapports" });
+  res.json({ status: "ok", message: "MTURF Robot OK", time: new Date().toISOString(), version: "v7.3-final" });
 });
 
 app.get("/ping", function (req, res) {
