@@ -20,6 +20,17 @@ function clean(txt) {
   return String(txt || "").replace(/\s+/g, " ").trim();
 }
 
+function slugifyHippo(name) {
+  return String(name || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/['']/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
 async function fetchHtml(url) {
   const res = await fetch(url, {
     headers: {
@@ -30,102 +41,45 @@ async function fetchHtml(url) {
     redirect: "follow"
   });
   if (!res.ok) throw new Error("HTTP " + res.status + " sur " + url);
-  return { html: await res.text(), finalUrl: res.url };
+  return await res.text();
 }
 
-function parseArrivee(text) {
-  const patterns = [
-    /Arriv[ée]e\s+officielle\s*[:\-]?\s*([0-9][0-9\s\-]+)/i,
-    /Arriv[ée]e\s+d[eé]finitive\s*[:\-]?\s*([0-9][0-9\s\-]+)/i,
-    /Arriv[ée]e\s*[:\-]?\s*([0-9][0-9\s\-]+)/i
-  ];
-  for (const p of patterns) {
-    const m = text.match(p);
-    if (m && m[1]) {
-      const s = clean(m[1].replace(/\s+/g, " "));
-      if (s.indexOf("-") >= 0) return s;
-    }
-  }
-  return "";
-}
-
-function parseMetaFromUrl(url) {
-  const m = url.match(/\/(\d{4}-\d{2}-\d{2})\/(R\d+)C(\d+)-([^/?#]+)/i);
-  if (!m) return null;
-  return {
-    date: m[1],
-    reunion: m[2].toUpperCase(),
-    course: "C" + m[3],
-    slug: m[4]
-  };
-}
-
-function extractCourseLinks($, dateStr) {
-  const links = new Set();
-  $("a[href]").each(function () {
-    let href = $(this).attr("href") || "";
-    if (!href) return;
-    let abs = href.startsWith("/") ? BASE + href : href;
-    if (abs.indexOf(dateStr) >= 0 && /\/course-du-jour\/.*\/R\d+C\d+-/i.test(abs)) {
-      abs = abs.split("#")[0].split("?")[0];
-      links.add(abs);
+// Extrait toutes les arrivées d'une page de réunion
+// Format de la page : tableau avec colonnes C1, C2, C3...
+// Chaque ligne contient "Arrivée officielle: 10 - 16 - 14 - 11 - 3 - 2 - 15"
+function extractArriveesFromReunionPage(html) {
+  const $ = cheerio.load(html);
+  const out = [];
+  // On cherche tous les TR du tableau qui contiennent "Arrivée officielle"
+  $("tr").each(function () {
+    const txt = clean($(this).text());
+    // Détecter le numéro de course (C1, C2, ...)
+    const cMatch = txt.match(/\bC(\d+)\b/);
+    // Détecter l'arrivée
+    const aMatch = txt.match(/Arriv[ée]e\s*officielle\s*[:\-]?\s*([0-9][0-9\s\-]+)/i);
+    if (cMatch && aMatch) {
+      const arrStr = clean(aMatch[1]);
+      if (arrStr.indexOf("-") >= 0) {
+        out.push({
+          course: "C" + cMatch[1],
+          arrivee_officielle: arrStr
+        });
+      }
     }
   });
-  return Array.from(links).sort();
-}
-
-// Brute force : essaye R1 à R15 et suit les redirections
-async function findCoursesByBruteForce(dateStr) {
-  const allLinks = new Set();
-  const attempts = [];
-  for (let i = 1; i <= 15; i++) {
-    const url = BASE + "/fr/reunion-du-jour/" + dateStr + "/R" + i;
-    try {
-      const { html, finalUrl } = await fetchHtml(url);
-      const $ = cheerio.load(html);
-      const found = extractCourseLinks($, dateStr);
-      attempts.push({
-        url: url,
-        finalUrl: finalUrl,
-        status: "ok",
-        htmlLength: html.length,
-        linksFound: found.length
-      });
-      found.forEach(function (l) { allLinks.add(l); });
-    } catch (e) {
-      attempts.push({
-        url: url,
-        status: "error",
-        message: String(e.message || e)
-      });
+  // Fallback : chercher dans tout le body si rien trouvé via tr
+  if (out.length === 0) {
+    const body = clean($("body").text());
+    const re = /\bC(\d+)\b[^A-Za-z]{0,200}Arriv[ée]e\s*officielle\s*[:\-]?\s*([0-9][0-9\s\-]+)/gi;
+    let m;
+    while ((m = re.exec(body)) !== null) {
+      const arrStr = clean(m[2]);
+      if (arrStr.indexOf("-") >= 0) {
+        out.push({ course: "C" + m[1], arrivee_officielle: arrStr });
+      }
     }
   }
-  return { links: Array.from(allLinks).sort(), attempts: attempts };
-}
-
-async function parseOneCourse(url) {
-  try {
-    const { html } = await fetchHtml(url);
-    const $ = cheerio.load(html);
-    const bodyText = clean($("body").text());
-    const meta = parseMetaFromUrl(url) || {};
-    let hippodrome = "";
-    if (meta.slug) {
-      const parts = meta.slug.split("-");
-      if (parts.length > 0) hippodrome = parts[0].toUpperCase();
-    }
-    return {
-      status: "ok",
-      url: url,
-      date: meta.date || "",
-      reunion: meta.reunion || "",
-      course: meta.course || "",
-      hippodrome: hippodrome,
-      arrivee_officielle: parseArrivee(bodyText)
-    };
-  } catch (e) {
-    return { status: "error", url: url, message: String(e.message || e) };
-  }
+  return out;
 }
 
 // ===================== ROUTES =====================
@@ -135,7 +89,7 @@ app.get("/", function (req, res) {
     status: "ok",
     message: "MTURF Robot OK",
     time: new Date().toISOString(),
-    version: "v3-bruteforce"
+    version: "v4-reunions"
   });
 });
 
@@ -143,24 +97,66 @@ app.get("/ping", function (req, res) {
   res.json({ status: "ok", awake: true });
 });
 
+// Route principale : reçoit la liste des réunions et renvoie les arrivées
+// /zeturf/jour?date=2026-04-18&reunions=R1-enghien-soisy,R2-avenches,R3-lyon-parilly
 app.get("/zeturf/jour", async function (req, res) {
   try {
     const date = req.query.date;
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res.status(400).json({ status: "error", message: "Date invalide, format YYYY-MM-DD" });
     }
-    const listing = await findCoursesByBruteForce(date);
-    const results = [];
-    for (const url of listing.links) {
-      const parsed = await parseOneCourse(url);
-      results.push(parsed);
+    const reunionsParam = req.query.reunions || "";
+    if (!reunionsParam) {
+      return res.json({
+        status: "ok",
+        date: date,
+        total: 0,
+        courses: [],
+        debug: { message: "Aucune reunion fournie, ajoute ?reunions=R1-enghien-soisy,R2-..." }
+      });
+    }
+    const reunionSlugs = reunionsParam.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    const allCourses = [];
+    const debugAttempts = [];
+    for (const slug of reunionSlugs) {
+      const reunionUrl = BASE + "/fr/reunion-du-jour/" + date + "/" + slug;
+      try {
+        const html = await fetchHtml(reunionUrl);
+        const arrivees = extractArriveesFromReunionPage(html);
+        debugAttempts.push({
+          url: reunionUrl,
+          status: "ok",
+          htmlLength: html.length,
+          arriveesFound: arrivees.length
+        });
+        // Numéro de réunion (R1, R2, ...) extrait du slug
+        const rMatch = slug.match(/^(R\d+)/i);
+        const reunion = rMatch ? rMatch[1].toUpperCase() : "";
+        const hippo = slug.replace(/^R\d+-?/i, "").toUpperCase();
+        for (const a of arrivees) {
+          allCourses.push({
+            status: "ok",
+            date: date,
+            reunion: reunion,
+            course: a.course,
+            hippodrome: hippo,
+            arrivee_officielle: a.arrivee_officielle
+          });
+        }
+      } catch (e) {
+        debugAttempts.push({
+          url: reunionUrl,
+          status: "error",
+          message: String(e.message || e)
+        });
+      }
     }
     res.json({
       status: "ok",
       date: date,
-      total: results.length,
-      courses: results,
-      debug: { attempts: listing.attempts }
+      total: allCourses.length,
+      courses: allCourses,
+      debug: { attempts: debugAttempts }
     });
   } catch (err) {
     res.status(500).json({
@@ -170,46 +166,23 @@ app.get("/zeturf/jour", async function (req, res) {
   }
 });
 
-app.get("/debug/listing", async function (req, res) {
+// Routes debug
+app.get("/debug/reunion", async function (req, res) {
   const date = req.query.date;
-  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    return res.status(400).json({ status: "error", message: "date YYYY-MM-DD requise" });
-  }
+  const slug = req.query.slug;
+  if (!date || !slug) return res.status(400).json({ status: "error", message: "date et slug requis" });
+  const url = BASE + "/fr/reunion-du-jour/" + date + "/" + slug;
   try {
-    const listing = await findCoursesByBruteForce(date);
-    res.json({
-      status: "ok",
-      date: date,
-      totalLinks: listing.links.length,
-      firstLinks: listing.links.slice(0, 20),
-      attempts: listing.attempts
-    });
+    const html = await fetchHtml(url);
+    const arrivees = extractArriveesFromReunionPage(html);
+    res.json({ status: "ok", url: url, htmlLength: html.length, arrivees: arrivees });
   } catch (err) {
-    res.status(500).json({ status: "error", message: String(err.message || err) });
+    res.status(500).json({ status: "error", url: url, message: String(err.message || err) });
   }
 });
 
-app.get("/debug/fetch", async function (req, res) {
-  const url = req.query.url;
-  if (!url) return res.status(400).json({ status: "error", message: "url requise" });
-  try {
-    const { html, finalUrl } = await fetchHtml(url);
-    const $ = cheerio.load(html);
-    const title = clean($("title").text());
-    const bodyText = clean($("body").text());
-    const arrivee = parseArrivee(bodyText);
-    res.json({
-      status: "ok",
-      url: url,
-      finalUrl: finalUrl,
-      htmlLength: html.length,
-      title: title,
-      arrivee_detectee: arrivee,
-      bodyStart: bodyText.slice(0, 500)
-    });
-  } catch (err) {
-    res.status(500).json({ status: "error", message: String(err.message || err) });
-  }
+app.get("/debug/slug", function (req, res) {
+  res.json({ status: "ok", input: req.query.name || "", slug: slugifyHippo(req.query.name || "") });
 });
 
 app.listen(PORT, function () {
