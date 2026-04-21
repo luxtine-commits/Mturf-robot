@@ -37,7 +37,6 @@ async function fetchHtml(url) {
   return await res.text();
 }
 
-// Parse une string "27,10 €" ou "27.10" ou "27,10" -> 27.10
 function parseRapport(str) {
   if (!str) return 0;
   const s = String(str).replace(/[€\s]/g, "").replace(",", ".");
@@ -45,7 +44,6 @@ function parseRapport(str) {
   return isNaN(n) ? 0 : n;
 }
 
-// Extrait les arrivées d'une page de réunion (tableau récap)
 function extractArriveesFromReunionPage(html) {
   const $ = cheerio.load(html);
   const out = [];
@@ -56,10 +54,7 @@ function extractArriveesFromReunionPage(html) {
     if (cMatch && aMatch) {
       const arrStr = clean(aMatch[1]);
       if (arrStr.indexOf("-") >= 0) {
-        out.push({
-          course: "C" + cMatch[1],
-          arrivee_officielle: arrStr
-        });
+        out.push({ course: "C" + cMatch[1], arrivee_officielle: arrStr });
       }
     }
   });
@@ -77,11 +72,9 @@ function extractArriveesFromReunionPage(html) {
   return out;
 }
 
-// Extrait la liste des liens vers les pages de courses depuis la page de réunion
-// Ex: <a href="/fr/course-du-jour/2026-04-18/R1C1-enghien-soisy-prix-...">
 function extractCourseLinksFromReunionPage(html, dateStr) {
   const $ = cheerio.load(html);
-  const map = {}; // { "C1": "https://...R1C1-...", "C2": "https://...R1C2-..." }
+  const map = {};
   $("a[href]").each(function () {
     let href = $(this).attr("href") || "";
     if (!href) return;
@@ -91,35 +84,24 @@ function extractCourseLinksFromReunionPage(html, dateStr) {
     if (!m) return;
     abs = abs.split("#")[0].split("?")[0];
     const ckey = "C" + m[1];
-    // garder le premier lien rencontré pour chaque course
     if (!map[ckey]) map[ckey] = abs;
   });
   return map;
 }
 
-// Extrait les rapports SG/ZS/ZC d'une page de course
-// Le tableau "RAPPORTS" -> "SIMPLE" contient les colonnes:
-//   N°  | SIMPLE GAGNANT | ZESHOW | SIMPLE PLACÉ | ZE COUILLON
-// Chaque ligne correspond à un cheval (1er, 2e, 3e, 4e de l'arrivée)
 function extractRapportsFromCoursePage(html) {
   const $ = cheerio.load(html);
   const result = { rapG: 0, rapZS: 0, rapZC: 0 };
-
-  // Chercher la table qui contient "SIMPLE GAGNANT" ou "ZESHOW"
   let targetTable = null;
   $("table").each(function () {
     const t = clean($(this).text());
     if (/SIMPLE\s+GAGNANT/i.test(t) && /ZESHOW/i.test(t)) {
       targetTable = $(this);
-      return false; // break
+      return false;
     }
   });
-
   if (!targetTable) return result;
-
-  // Trouver la position des colonnes SG, ZS, ZC dans le header
   let idxSG = -1, idxZS = -1, idxZC = -1;
-  // Chercher la ligne d'en-tête (celle qui contient "SIMPLE GAGNANT")
   let headerRow = null;
   targetTable.find("tr").each(function () {
     const t = clean($(this).text());
@@ -129,7 +111,6 @@ function extractRapportsFromCoursePage(html) {
     }
   });
   if (!headerRow) return result;
-
   const headerCells = headerRow.find("th, td");
   headerCells.each(function (i) {
     const t = clean($(this).text()).toUpperCase();
@@ -137,11 +118,6 @@ function extractRapportsFromCoursePage(html) {
     else if (/ZESHOW/.test(t)) idxZS = i;
     else if (/ZE\s+COUILLON/.test(t)) idxZC = i;
   });
-
-  // Parcourir les lignes après le header pour trouver les valeurs
-  // 1ère ligne de data = 1er à l'arrivée (SG)
-  // 2e ligne de data = 2e (ZS)
-  // 4e ligne de data = 4e (ZC)
   const dataRows = [];
   let foundHeader = false;
   targetTable.find("tr").each(function () {
@@ -149,13 +125,10 @@ function extractRapportsFromCoursePage(html) {
     if (!foundHeader) return;
     const cells = $(this).find("td");
     if (cells.length === 0) return;
-    // S'arrêter si on tombe sur une nouvelle section (jumelé, trio, etc.)
     const rowText = clean($(this).text()).toUpperCase();
     if (/JUMEL|TRIO|ZE\s*\d|MULTI/.test(rowText) && !/€/.test(rowText)) return;
     dataRows.push(cells);
   });
-
-  // Récupérer les valeurs
   if (dataRows.length >= 1 && idxSG >= 0) {
     const cell = dataRows[0].eq(idxSG);
     if (cell && cell.length) result.rapG = parseRapport(clean(cell.text()));
@@ -168,7 +141,6 @@ function extractRapportsFromCoursePage(html) {
     const cell = dataRows[3].eq(idxZC);
     if (cell && cell.length) result.rapZC = parseRapport(clean(cell.text()));
   }
-
   return result;
 }
 
@@ -179,7 +151,7 @@ app.get("/", function (req, res) {
     status: "ok",
     message: "MTURF Robot OK",
     time: new Date().toISOString(),
-    version: "v5-rapports"
+    version: "v5b-debug"
   });
 });
 
@@ -187,8 +159,6 @@ app.get("/ping", function (req, res) {
   res.json({ status: "ok", awake: true });
 });
 
-// Route principale
-// /zeturf/jour?date=2026-04-18&reunions=R1-enghien-soisy,R2-...&rapports=1
 app.get("/zeturf/jour", async function (req, res) {
   try {
     const date = req.query.date;
@@ -218,7 +188,6 @@ app.get("/zeturf/jour", async function (req, res) {
         const rMatch = slug.match(/^(R\d+)/i);
         const reunion = rMatch ? rMatch[1].toUpperCase() : "";
         const hippo = slug.replace(/^R\d+-?/i, "").toUpperCase();
-
         for (const a of arrivees) {
           const courseObj = {
             status: "ok",
@@ -231,10 +200,9 @@ app.get("/zeturf/jour", async function (req, res) {
             rapZS: 0,
             rapZC: 0
           };
-          // Si on veut les rapports, fetch la page de la course
           if (wantRapports && courseLinks[a.course]) {
             try {
-              await sleep(300); // petit délai anti-bourrinage
+              await sleep(300);
               const cHtml = await fetchHtml(courseLinks[a.course]);
               const rap = extractRapportsFromCoursePage(cHtml);
               courseObj.rapG = rap.rapG;
@@ -268,19 +236,6 @@ app.get("/zeturf/jour", async function (req, res) {
   }
 });
 
-// Debug : tester l'extraction des rapports sur une page de course précise
-app.get("/debug/course", async function (req, res) {
-  const url = req.query.url;
-  if (!url) return res.status(400).json({ status: "error", message: "url requise" });
-  try {
-    const html = await fetchHtml(url);
-    const rap = extractRapportsFromCoursePage(html);
-    res.json({ status: "ok", url: url, rapports: rap });
-  } catch (err) {
-    res.status(500).json({ status: "error", message: String(err.message || err) });
-  }
-});
-
 app.get("/debug/reunion", async function (req, res) {
   const date = req.query.date;
   const slug = req.query.slug;
@@ -296,36 +251,40 @@ app.get("/debug/reunion", async function (req, res) {
   }
 });
 
-app.listen(PORT, function () {
-  console.log("Server running on " + PORT);
-});
-// Debug : retourne le HTML brut d'une page de course (pour analyse)
-app.get("/debug/coursehtml", async function (req, res) {
+// Debug page de course : renvoie le contexte HTML autour de "RAPPORTS"
+app.get("/debug/course", async function (req, res) {
   const date = req.query.date;
-  const slug = req.query.slug; // ex: R1C1-enghien-soisy-prix-de-ville-d-eaubonne
+  const slug = req.query.slug;
   if (!date || !slug) return res.status(400).json({ status: "error", message: "date et slug requis" });
   const url = BASE + "/fr/course-du-jour/" + date + "/" + slug;
   try {
     const html = await fetchHtml(url);
     const $ = cheerio.load(html);
-    // Trouver la zone qui contient les rapports
     const body = clean($("body").text());
     const idx = body.toUpperCase().indexOf("RAPPORTS");
-    const around = idx >= 0 ? body.slice(idx, idx + 1500) : "(pas trouvé 'RAPPORTS')";
-    // Liste des classes de tables et divs autour
+    const around = idx >= 0 ? body.slice(idx, idx + 1500) : "(pas trouvé RAPPORTS)";
     const tableCount = $("table").length;
-    const divCount = $("div").length;
+    // Tester si nos détections de tableau marchent
+    let foundSimpleGagnantTable = false;
+    $("table").each(function () {
+      const t = clean($(this).text());
+      if (/SIMPLE\s+GAGNANT/i.test(t)) foundSimpleGagnantTable = true;
+    });
+    const rap = extractRapportsFromCoursePage(html);
     res.json({
       status: "ok",
       url: url,
       htmlLength: html.length,
       tableCount: tableCount,
-      divCount: divCount,
+      foundSimpleGagnantTable: foundSimpleGagnantTable,
+      rapports: rap,
       rapportsZone: around
     });
   } catch (err) {
     res.status(500).json({ status: "error", url: url, message: String(err.message || err) });
   }
 });
-app.listen(PORT, function () {
 
+app.listen(PORT, function () {
+  console.log("Server running on " + PORT);
+});
