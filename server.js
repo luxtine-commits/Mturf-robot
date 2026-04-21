@@ -82,17 +82,14 @@ function extractCourseLinksFromReunionPage(html, dateStr) {
   return map;
 }
 
-// PARSER v6.2 : scan COMPLET de la page + détection de clusters
 function extractRapportsFromCoursePage(html, arriveeStr) {
   const $ = cheerio.load(html);
   const body = clean($("body").text());
   const result = { rapG: 0, rapZS: 0, rapZC: 0, _arrivee: arriveeStr || "", _matched: false };
 
-  // 1) Compter les € dans la page entière
   const euroMatches = body.match(/€/g);
   result._totalEurosInPage = euroMatches ? euroMatches.length : 0;
 
-  // 2) Scanner TOUT le body pour des patterns "num + montants €"
   const lineRe = /(\d{1,2})\s+((?:\d+[.,]\d+\s*€\s*){1,4})/g;
   const allLines = [];
   let lm;
@@ -107,7 +104,6 @@ function extractRapportsFromCoursePage(html, arriveeStr) {
   }
   result._totalLinesInPage = allLines.length;
 
-  // 3) Regrouper en clusters (lignes proches dans le HTML)
   const clusters = [];
   let current = [];
   let lastPos = -10000;
@@ -120,15 +116,10 @@ function extractRapportsFromCoursePage(html, arriveeStr) {
     lastPos = line.pos;
   }
   if (current.length > 0) clusters.push(current);
-
-  // Le plus gros cluster = probablement le tableau des rapports
   clusters.sort((a, b) => b.length - a.length);
   const best = clusters[0] || [];
-  result._clustersCount = clusters.length;
-  result._bestClusterSize = best.length;
   result._linesFound = best.map(function (l) { return { num: l.num, values: l.values }; });
 
-  // 4) Associer aux numéros d'arrivée
   const arrNums = String(arriveeStr || "").split(/[-–—]/).map(function (x) { return parseInt(String(x).trim()); }).filter(function (n) { return n > 0; });
   result._arrNums = arrNums;
 
@@ -151,7 +142,7 @@ function extractRapportsFromCoursePage(html, arriveeStr) {
 // ===================== ROUTES =====================
 
 app.get("/", function (req, res) {
-  res.json({ status: "ok", message: "MTURF Robot OK", time: new Date().toISOString(), version: "v6.2-scan-complet" });
+  res.json({ status: "ok", message: "MTURF Robot OK", time: new Date().toISOString(), version: "v6.3-raw-debug" });
 });
 
 app.get("/ping", function (req, res) {
@@ -162,51 +153,37 @@ app.get("/zeturf/jour", async function (req, res) {
   try {
     const date = req.query.date;
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res.status(400).json({ status: "error", message: "Date invalide, format YYYY-MM-DD" });
+      return res.status(400).json({ status: "error", message: "Date invalide" });
     }
     const reunionsParam = req.query.reunions || "";
     const wantRapports = req.query.rapports === "1" || req.query.rapports === "true";
-    if (!reunionsParam) {
-      return res.json({ status: "ok", date: date, total: 0, courses: [] });
-    }
+    if (!reunionsParam) return res.json({ status: "ok", date: date, total: 0, courses: [] });
     const reunionSlugs = reunionsParam.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
     const allCourses = [];
-    const debugAttempts = [];
     for (const slug of reunionSlugs) {
       const reunionUrl = BASE + "/fr/reunion-du-jour/" + date + "/" + slug;
       try {
         const html = await fetchHtml(reunionUrl);
         const arrivees = extractArriveesFromReunionPage(html);
         const courseLinks = extractCourseLinksFromReunionPage(html, date);
-        debugAttempts.push({ url: reunionUrl, status: "ok", arriveesFound: arrivees.length, linksFound: Object.keys(courseLinks).length });
         const rMatch = slug.match(/^(R\d+)/i);
         const reunion = rMatch ? rMatch[1].toUpperCase() : "";
         const hippo = slug.replace(/^R\d+-?/i, "").toUpperCase();
         for (const a of arrivees) {
-          const courseObj = {
-            status: "ok", date: date, reunion: reunion, course: a.course,
-            hippodrome: hippo, arrivee_officielle: a.arrivee_officielle,
-            rapG: 0, rapZS: 0, rapZC: 0
-          };
+          const c = { status: "ok", date: date, reunion: reunion, course: a.course, hippodrome: hippo, arrivee_officielle: a.arrivee_officielle, rapG: 0, rapZS: 0, rapZC: 0 };
           if (wantRapports && courseLinks[a.course]) {
             try {
               await sleep(300);
               const cHtml = await fetchHtml(courseLinks[a.course]);
               const rap = extractRapportsFromCoursePage(cHtml, a.arrivee_officielle);
-              courseObj.rapG = rap.rapG;
-              courseObj.rapZS = rap.rapZS;
-              courseObj.rapZC = rap.rapZC;
-            } catch (e) {
-              courseObj.rapportsError = String(e.message || e);
-            }
+              c.rapG = rap.rapG; c.rapZS = rap.rapZS; c.rapZC = rap.rapZC;
+            } catch (e) { c.rapportsError = String(e.message || e); }
           }
-          allCourses.push(courseObj);
+          allCourses.push(c);
         }
-      } catch (e) {
-        debugAttempts.push({ url: reunionUrl, status: "error", message: String(e.message || e) });
-      }
+      } catch (e) {}
     }
-    res.json({ status: "ok", date: date, total: allCourses.length, withRapports: wantRapports, courses: allCourses, debug: { attempts: debugAttempts } });
+    res.json({ status: "ok", date: date, total: allCourses.length, withRapports: wantRapports, courses: allCourses });
   } catch (err) {
     res.status(500).json({ status: "error", message: String(err.message || err) });
   }
@@ -215,15 +192,13 @@ app.get("/zeturf/jour", async function (req, res) {
 app.get("/debug/reunion", async function (req, res) {
   const date = req.query.date;
   const slug = req.query.slug;
-  if (!date || !slug) return res.status(400).json({ status: "error", message: "date et slug requis" });
+  if (!date || !slug) return res.status(400).json({ status: "error" });
   const url = BASE + "/fr/reunion-du-jour/" + date + "/" + slug;
   try {
     const html = await fetchHtml(url);
-    const arrivees = extractArriveesFromReunionPage(html);
-    const links = extractCourseLinksFromReunionPage(html, date);
-    res.json({ status: "ok", url: url, arrivees: arrivees, courseLinks: links });
+    res.json({ status: "ok", url: url, arrivees: extractArriveesFromReunionPage(html), courseLinks: extractCourseLinksFromReunionPage(html, date) });
   } catch (err) {
-    res.status(500).json({ status: "error", url: url, message: String(err.message || err) });
+    res.status(500).json({ status: "error", message: String(err.message || err) });
   }
 });
 
@@ -231,14 +206,55 @@ app.get("/debug/course", async function (req, res) {
   const date = req.query.date;
   const slug = req.query.slug;
   const arr = req.query.arrivee || "";
-  if (!date || !slug) return res.status(400).json({ status: "error", message: "date et slug requis" });
+  if (!date || !slug) return res.status(400).json({ status: "error" });
   const url = BASE + "/fr/course-du-jour/" + date + "/" + slug;
   try {
     const html = await fetchHtml(url);
     const rap = extractRapportsFromCoursePage(html, arr);
     res.json({ status: "ok", url: url, htmlLength: html.length, rapports: rap });
   } catch (err) {
-    res.status(500).json({ status: "error", url: url, message: String(err.message || err) });
+    res.status(500).json({ status: "error", message: String(err.message || err) });
+  }
+});
+
+// NOUVELLE ROUTE : extrait 200 caractères bruts autour de chaque €
+app.get("/debug/raw", async function (req, res) {
+  const date = req.query.date;
+  const slug = req.query.slug;
+  if (!date || !slug) return res.status(400).json({ status: "error", message: "date et slug requis" });
+  const url = BASE + "/fr/course-du-jour/" + date + "/" + slug;
+  try {
+    const html = await fetchHtml(url);
+    // Retirer les scripts et styles pour voir le vrai contenu
+    const htmlNoScript = html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "");
+    // Trouver toutes les positions des €
+    const positions = [];
+    let idx = 0;
+    while ((idx = htmlNoScript.indexOf("€", idx)) !== -1) {
+      positions.push(idx);
+      idx++;
+    }
+    // Prendre les 5 premiers € et extraire 150 chars avant, 50 chars après
+    const samples = [];
+    for (let i = 0; i < Math.min(positions.length, 6); i++) {
+      const p = positions[i];
+      const start = Math.max(0, p - 150);
+      const end = Math.min(htmlNoScript.length, p + 50);
+      samples.push({
+        position: p,
+        snippet: htmlNoScript.slice(start, end)
+      });
+    }
+    res.json({
+      status: "ok",
+      url: url,
+      htmlLength: html.length,
+      htmlNoScriptLength: htmlNoScript.length,
+      eurosCount: positions.length,
+      samples: samples
+    });
+  } catch (err) {
+    res.status(500).json({ status: "error", message: String(err.message || err) });
   }
 });
 
