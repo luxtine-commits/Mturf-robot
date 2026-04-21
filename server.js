@@ -299,3 +299,33 @@ app.get("/debug/reunion", async function (req, res) {
 app.listen(PORT, function () {
   console.log("Server running on " + PORT);
 });
+// Debug : retourne le HTML brut d'une page de course (pour analyse)
+app.get("/debug/coursehtml", async function (req, res) {
+  const date = req.query.date;
+  const slug = req.query.slug; // ex: R1C1-enghien-soisy-prix-de-ville-d-eaubonne
+  if (!date || !slug) return res.status(400).json({ status: "error", message: "date et slug requis" });
+  const url = BASE + "/fr/course-du-jour/" + date + "/" + slug;
+  try {
+    const html = await fetchHtml(url);
+    const $ = cheerio.load(html);
+    // Trouver la zone qui contient les rapports
+    const body = clean($("body").text());
+    const idx = body.toUpperCase().indexOf("RAPPORTS");
+    const around = idx >= 0 ? body.slice(idx, idx + 1500) : "(pas trouvé 'RAPPORTS')";
+    // Liste des classes de tables et divs autour
+    const tableCount = $("table").length;
+    const divCount = $("div").length;
+    res.json({
+      status: "ok",
+      url: url,
+      htmlLength: html.length,
+      tableCount: tableCount,
+      divCount: divCount,
+      rapportsZone: around
+    });
+  } catch (err) {
+    res.status(500).json({ status: "error", url: url, message: String(err.message || err) });
+  }
+});
+app.listen(PORT, function () {
+
