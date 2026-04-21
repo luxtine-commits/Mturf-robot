@@ -20,15 +20,8 @@ function clean(txt) {
   return String(txt || "").replace(/\s+/g, " ").trim();
 }
 
-function slugifyHippo(name) {
-  return String(name || "")
-    .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/['']/g, "-")
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9-]/g, "")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
+function sleep(ms) {
+  return new Promise(function (r) { setTimeout(r, ms); });
 }
 
 async function fetchHtml(url) {
@@ -44,18 +37,21 @@ async function fetchHtml(url) {
   return await res.text();
 }
 
-// Extrait toutes les arrivées d'une page de réunion
-// Format de la page : tableau avec colonnes C1, C2, C3...
-// Chaque ligne contient "Arrivée officielle: 10 - 16 - 14 - 11 - 3 - 2 - 15"
+// Parse une string "27,10 €" ou "27.10" ou "27,10" -> 27.10
+function parseRapport(str) {
+  if (!str) return 0;
+  const s = String(str).replace(/[€\s]/g, "").replace(",", ".");
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+}
+
+// Extrait les arrivées d'une page de réunion (tableau récap)
 function extractArriveesFromReunionPage(html) {
   const $ = cheerio.load(html);
   const out = [];
-  // On cherche tous les TR du tableau qui contiennent "Arrivée officielle"
   $("tr").each(function () {
     const txt = clean($(this).text());
-    // Détecter le numéro de course (C1, C2, ...)
     const cMatch = txt.match(/\bC(\d+)\b/);
-    // Détecter l'arrivée
     const aMatch = txt.match(/Arriv[ée]e\s*officielle\s*[:\-]?\s*([0-9][0-9\s\-]+)/i);
     if (cMatch && aMatch) {
       const arrStr = clean(aMatch[1]);
@@ -67,7 +63,6 @@ function extractArriveesFromReunionPage(html) {
       }
     }
   });
-  // Fallback : chercher dans tout le body si rien trouvé via tr
   if (out.length === 0) {
     const body = clean($("body").text());
     const re = /\bC(\d+)\b[^A-Za-z]{0,200}Arriv[ée]e\s*officielle\s*[:\-]?\s*([0-9][0-9\s\-]+)/gi;
@@ -82,6 +77,101 @@ function extractArriveesFromReunionPage(html) {
   return out;
 }
 
+// Extrait la liste des liens vers les pages de courses depuis la page de réunion
+// Ex: <a href="/fr/course-du-jour/2026-04-18/R1C1-enghien-soisy-prix-...">
+function extractCourseLinksFromReunionPage(html, dateStr) {
+  const $ = cheerio.load(html);
+  const map = {}; // { "C1": "https://...R1C1-...", "C2": "https://...R1C2-..." }
+  $("a[href]").each(function () {
+    let href = $(this).attr("href") || "";
+    if (!href) return;
+    let abs = href.startsWith("/") ? BASE + href : href;
+    if (abs.indexOf(dateStr) < 0) return;
+    const m = abs.match(/\/R\d+C(\d+)-/i);
+    if (!m) return;
+    abs = abs.split("#")[0].split("?")[0];
+    const ckey = "C" + m[1];
+    // garder le premier lien rencontré pour chaque course
+    if (!map[ckey]) map[ckey] = abs;
+  });
+  return map;
+}
+
+// Extrait les rapports SG/ZS/ZC d'une page de course
+// Le tableau "RAPPORTS" -> "SIMPLE" contient les colonnes:
+//   N°  | SIMPLE GAGNANT | ZESHOW | SIMPLE PLACÉ | ZE COUILLON
+// Chaque ligne correspond à un cheval (1er, 2e, 3e, 4e de l'arrivée)
+function extractRapportsFromCoursePage(html) {
+  const $ = cheerio.load(html);
+  const result = { rapG: 0, rapZS: 0, rapZC: 0 };
+
+  // Chercher la table qui contient "SIMPLE GAGNANT" ou "ZESHOW"
+  let targetTable = null;
+  $("table").each(function () {
+    const t = clean($(this).text());
+    if (/SIMPLE\s+GAGNANT/i.test(t) && /ZESHOW/i.test(t)) {
+      targetTable = $(this);
+      return false; // break
+    }
+  });
+
+  if (!targetTable) return result;
+
+  // Trouver la position des colonnes SG, ZS, ZC dans le header
+  let idxSG = -1, idxZS = -1, idxZC = -1;
+  // Chercher la ligne d'en-tête (celle qui contient "SIMPLE GAGNANT")
+  let headerRow = null;
+  targetTable.find("tr").each(function () {
+    const t = clean($(this).text());
+    if (/SIMPLE\s+GAGNANT/i.test(t)) {
+      headerRow = $(this);
+      return false;
+    }
+  });
+  if (!headerRow) return result;
+
+  const headerCells = headerRow.find("th, td");
+  headerCells.each(function (i) {
+    const t = clean($(this).text()).toUpperCase();
+    if (/SIMPLE\s+GAGNANT/.test(t)) idxSG = i;
+    else if (/ZESHOW/.test(t)) idxZS = i;
+    else if (/ZE\s+COUILLON/.test(t)) idxZC = i;
+  });
+
+  // Parcourir les lignes après le header pour trouver les valeurs
+  // 1ère ligne de data = 1er à l'arrivée (SG)
+  // 2e ligne de data = 2e (ZS)
+  // 4e ligne de data = 4e (ZC)
+  const dataRows = [];
+  let foundHeader = false;
+  targetTable.find("tr").each(function () {
+    if (this === headerRow[0]) { foundHeader = true; return; }
+    if (!foundHeader) return;
+    const cells = $(this).find("td");
+    if (cells.length === 0) return;
+    // S'arrêter si on tombe sur une nouvelle section (jumelé, trio, etc.)
+    const rowText = clean($(this).text()).toUpperCase();
+    if (/JUMEL|TRIO|ZE\s*\d|MULTI/.test(rowText) && !/€/.test(rowText)) return;
+    dataRows.push(cells);
+  });
+
+  // Récupérer les valeurs
+  if (dataRows.length >= 1 && idxSG >= 0) {
+    const cell = dataRows[0].eq(idxSG);
+    if (cell && cell.length) result.rapG = parseRapport(clean(cell.text()));
+  }
+  if (dataRows.length >= 2 && idxZS >= 0) {
+    const cell = dataRows[1].eq(idxZS);
+    if (cell && cell.length) result.rapZS = parseRapport(clean(cell.text()));
+  }
+  if (dataRows.length >= 4 && idxZC >= 0) {
+    const cell = dataRows[3].eq(idxZC);
+    if (cell && cell.length) result.rapZC = parseRapport(clean(cell.text()));
+  }
+
+  return result;
+}
+
 // ===================== ROUTES =====================
 
 app.get("/", function (req, res) {
@@ -89,7 +179,7 @@ app.get("/", function (req, res) {
     status: "ok",
     message: "MTURF Robot OK",
     time: new Date().toISOString(),
-    version: "v4-reunions"
+    version: "v5-rapports"
   });
 });
 
@@ -97,8 +187,8 @@ app.get("/ping", function (req, res) {
   res.json({ status: "ok", awake: true });
 });
 
-// Route principale : reçoit la liste des réunions et renvoie les arrivées
-// /zeturf/jour?date=2026-04-18&reunions=R1-enghien-soisy,R2-avenches,R3-lyon-parilly
+// Route principale
+// /zeturf/jour?date=2026-04-18&reunions=R1-enghien-soisy,R2-...&rapports=1
 app.get("/zeturf/jour", async function (req, res) {
   try {
     const date = req.query.date;
@@ -106,14 +196,9 @@ app.get("/zeturf/jour", async function (req, res) {
       return res.status(400).json({ status: "error", message: "Date invalide, format YYYY-MM-DD" });
     }
     const reunionsParam = req.query.reunions || "";
+    const wantRapports = req.query.rapports === "1" || req.query.rapports === "true";
     if (!reunionsParam) {
-      return res.json({
-        status: "ok",
-        date: date,
-        total: 0,
-        courses: [],
-        debug: { message: "Aucune reunion fournie, ajoute ?reunions=R1-enghien-soisy,R2-..." }
-      });
+      return res.json({ status: "ok", date: date, total: 0, courses: [], debug: { message: "Aucune reunion fournie" } });
     }
     const reunionSlugs = reunionsParam.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
     const allCourses = [];
@@ -123,25 +208,44 @@ app.get("/zeturf/jour", async function (req, res) {
       try {
         const html = await fetchHtml(reunionUrl);
         const arrivees = extractArriveesFromReunionPage(html);
+        const courseLinks = extractCourseLinksFromReunionPage(html, date);
         debugAttempts.push({
           url: reunionUrl,
           status: "ok",
-          htmlLength: html.length,
-          arriveesFound: arrivees.length
+          arriveesFound: arrivees.length,
+          linksFound: Object.keys(courseLinks).length
         });
-        // Numéro de réunion (R1, R2, ...) extrait du slug
         const rMatch = slug.match(/^(R\d+)/i);
         const reunion = rMatch ? rMatch[1].toUpperCase() : "";
         const hippo = slug.replace(/^R\d+-?/i, "").toUpperCase();
+
         for (const a of arrivees) {
-          allCourses.push({
+          const courseObj = {
             status: "ok",
             date: date,
             reunion: reunion,
             course: a.course,
             hippodrome: hippo,
-            arrivee_officielle: a.arrivee_officielle
-          });
+            arrivee_officielle: a.arrivee_officielle,
+            rapG: 0,
+            rapZS: 0,
+            rapZC: 0
+          };
+          // Si on veut les rapports, fetch la page de la course
+          if (wantRapports && courseLinks[a.course]) {
+            try {
+              await sleep(300); // petit délai anti-bourrinage
+              const cHtml = await fetchHtml(courseLinks[a.course]);
+              const rap = extractRapportsFromCoursePage(cHtml);
+              courseObj.rapG = rap.rapG;
+              courseObj.rapZS = rap.rapZS;
+              courseObj.rapZC = rap.rapZC;
+              courseObj.courseUrl = courseLinks[a.course];
+            } catch (e) {
+              courseObj.rapportsError = String(e.message || e);
+            }
+          }
+          allCourses.push(courseObj);
         }
       } catch (e) {
         debugAttempts.push({
@@ -155,18 +259,28 @@ app.get("/zeturf/jour", async function (req, res) {
       status: "ok",
       date: date,
       total: allCourses.length,
+      withRapports: wantRapports,
       courses: allCourses,
       debug: { attempts: debugAttempts }
     });
   } catch (err) {
-    res.status(500).json({
-      status: "error",
-      message: String(err.message || err)
-    });
+    res.status(500).json({ status: "error", message: String(err.message || err) });
   }
 });
 
-// Routes debug
+// Debug : tester l'extraction des rapports sur une page de course précise
+app.get("/debug/course", async function (req, res) {
+  const url = req.query.url;
+  if (!url) return res.status(400).json({ status: "error", message: "url requise" });
+  try {
+    const html = await fetchHtml(url);
+    const rap = extractRapportsFromCoursePage(html);
+    res.json({ status: "ok", url: url, rapports: rap });
+  } catch (err) {
+    res.status(500).json({ status: "error", message: String(err.message || err) });
+  }
+});
+
 app.get("/debug/reunion", async function (req, res) {
   const date = req.query.date;
   const slug = req.query.slug;
@@ -175,14 +289,11 @@ app.get("/debug/reunion", async function (req, res) {
   try {
     const html = await fetchHtml(url);
     const arrivees = extractArriveesFromReunionPage(html);
-    res.json({ status: "ok", url: url, htmlLength: html.length, arrivees: arrivees });
+    const links = extractCourseLinksFromReunionPage(html, date);
+    res.json({ status: "ok", url: url, arrivees: arrivees, courseLinks: links });
   } catch (err) {
     res.status(500).json({ status: "error", url: url, message: String(err.message || err) });
   }
-});
-
-app.get("/debug/slug", function (req, res) {
-  res.json({ status: "ok", input: req.query.name || "", slug: slugifyHippo(req.query.name || "") });
 });
 
 app.listen(PORT, function () {
