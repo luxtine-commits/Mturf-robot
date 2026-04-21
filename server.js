@@ -16,7 +16,7 @@ const PORT = process.env.PORT || 10000;
 const BASE = "https://www.zeturf.fr";
 
 function clean(txt) {
-  return String(txt || "").replace(/\s+/g, " ").trim();
+  return String(txt || "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
@@ -36,7 +36,7 @@ async function fetchHtml(url) {
 
 function parseEuro(str) {
   if (!str) return 0;
-  const s = String(str).replace(/[€\s]/g, "").replace(",", ".");
+  const s = String(str).replace(/[€\s\u00A0]/g, "").replace(",", ".");
   const n = parseFloat(s);
   return isNaN(n) ? 0 : n;
 }
@@ -82,91 +82,111 @@ function extractCourseLinksFromReunionPage(html, dateStr) {
   return map;
 }
 
-// NOUVEAU PARSER : basé sur le texte brut, beaucoup plus robuste
-// Le bloc dans le HTML ressemble à :
-// "Simple gagnant Simple ZEshow Simple placé ZE couillon
-//  10 27,10 € 7,40 €
-//  16 9,90 € 2,30 €
-//  14 3,20 €
-//  11 13,60 €"
-// On parse les 4 lignes après l'en-tête.
+// PARSER v6.1 : beaucoup plus tolérant. On localise la zone "RAPPORTS"
+// et on extrait les paires (numéro de cheval, montants en €) sans imposer
+// un format strict d'en-tête.
 function extractRapportsFromCoursePage(html, arriveeStr) {
   const $ = cheerio.load(html);
   const body = clean($("body").text());
   const result = { rapG: 0, rapZS: 0, rapZC: 0, _arrivee: arriveeStr || "", _matched: false };
 
-  // Trouver la zone qui contient "ZEshow" et "Simple placé" et "ZE couillon"
-  // (c'est l'en-tête du tableau des rapports SIMPLE)
-  const headerRe = /Simple\s+gagnant.{0,40}ZEshow.{0,40}Simple\s+plac[ée].{0,40}ZE\s+couillon/i;
-  const hMatch = body.match(headerRe);
-  if (!hMatch) return result;
+  // 1) Localiser le début de la zone RAPPORTS / SIMPLE
+  // On essaie plusieurs ancres dans l'ordre
+  const anchors = [
+    /\bRAPPORTS\b/i,
+    /SIMPLE\s+GAGNANT/i,
+    /ZEshow/i
+  ];
+  let startIdx = -1;
+  for (const re of anchors) {
+    const m = body.match(re);
+    if (m) {
+      startIdx = body.indexOf(m[0]);
+      break;
+    }
+  }
+  if (startIdx < 0) {
+    result._zone = "(aucune ancre RAPPORTS/SIMPLE GAGNANT/ZEshow trouvée)";
+    return result;
+  }
 
-  // Le bloc utile est juste après cet en-tête, jusqu'à "Jumelé" ou "Numéro"
-  const startIdx = body.indexOf(hMatch[0]) + hMatch[0].length;
-  const endIdx = (function () {
-    const candidates = [body.indexOf("Jumelé", startIdx), body.indexOf("JUMEL", startIdx), body.indexOf("Numéro Plus", startIdx)];
-    const valid = candidates.filter(function (x) { return x > 0; });
-    return valid.length ? Math.min.apply(null, valid) : startIdx + 500;
-  })();
+  // 2) Trouver la fin (avant Jumelé / Numéro Plus)
+  const endCandidates = [
+    body.indexOf("Jumelé", startIdx),
+    body.indexOf("JUMEL", startIdx),
+    body.indexOf("Numéro Plus", startIdx),
+    body.indexOf("Multi", startIdx)
+  ].filter(function (x) { return x > 0; });
+  const endIdx = endCandidates.length ? Math.min.apply(null, endCandidates) : Math.min(body.length, startIdx + 800);
   const zone = body.slice(startIdx, endIdx);
 
-  // Extraire des paires "numero  X,XX €  Y,YY €"
-  // ex : "10 27,10 € 7,40 € 16 9,90 € 2,30 € 14 3,20 € 11 13,60 €"
-  // Pattern : un numéro de cheval suivi d'un ou plusieurs montants en €
-  const lineRe = /(\d{1,2})\b(?:\s+(\d+[.,]\d+)\s*€)?(?:\s+(\d+[.,]\d+)\s*€)?(?:\s+(\d+[.,]\d+)\s*€)?(?:\s+(\d+[.,]\d+)\s*€)?/g;
-  // On cherche jusqu'à 4 lignes (4 chevaux : 1er, 2e, 3e, 4e)
+  // 3) Skipper la partie "header" (mots SIMPLE GAGNANT, ZEshow, etc.)
+  // On commence à parser après le dernier mot d'en-tête ZE COUILLON / ZECOUILLON / SIMPLE PLACÉ
+  const headerEndIdx = (function () {
+    const candidates = [
+      zone.search(/ZE\s*COUILLON/i),
+      zone.search(/SIMPLE\s+PLAC[ÉE]/i),
+      zone.search(/ZEshow/i)
+    ].filter(function (x) { return x >= 0; });
+    if (!candidates.length) return 0;
+    const last = Math.max.apply(null, candidates);
+    // Avancer jusqu'au prochain caractère non-lettre après cette position
+    const tail = zone.slice(last);
+    const m = tail.match(/[A-ZÉÈ]+/);
+    return m ? last + m[0].length : last;
+  })();
+  const dataZone = zone.slice(headerEndIdx);
+
+  // 4) Extraire les "lignes" : numéro suivi d'un ou plusieurs montants en €
+  // Ex : "10 27,10 € 7,40 € 16 9,90 € 2,30 € 14 3,20 € 11 13,60 €"
+  // On accepte aussi : "10 27.10€ 7,40€ ..." avec ou sans espace avant €
+  const lineRe = /(\d{1,2})\s+((?:\d+[.,]\d+\s*€\s*){1,4})/g;
   const lines = [];
   let lm;
-  while ((lm = lineRe.exec(zone)) !== null && lines.length < 6) {
+  while ((lm = lineRe.exec(dataZone)) !== null && lines.length < 8) {
     const num = parseInt(lm[1]);
     if (!num) continue;
-    const vals = [lm[2], lm[3], lm[4], lm[5]].filter(Boolean).map(parseEuro);
-    lines.push({ num: num, values: vals });
+    // Extraire les montants un par un
+    const valsRe = /(\d+[.,]\d+)\s*€/g;
+    const vals = [];
+    let vm;
+    while ((vm = valsRe.exec(lm[2])) !== null) {
+      vals.push(parseEuro(vm[1]));
+    }
+    if (vals.length > 0) lines.push({ num: num, values: vals });
   }
 
-  // Maintenant on associe : la ligne dont le numéro correspond au 1er de l'arrivée → SG (1ère valeur)
-  // 2e de l'arrivée → ZS (2e valeur dans la ligne du 2e cheval)
-  // 4e de l'arrivée → ZC (...)
+  result._linesFound = lines;
+  result._zoneStart = zone.slice(0, 200);
+  result._dataZoneStart = dataZone.slice(0, 200);
+
+  // 5) Associer aux numéros d'arrivée
   const arrNums = String(arriveeStr || "").split(/[-–—]/).map(function (x) { return parseInt(String(x).trim()); }).filter(function (n) { return n > 0; });
+  result._arrNums = arrNums;
 
-  if (arrNums.length >= 1 && lines[0] && lines[0].num === arrNums[0]) {
-    // Ligne du 1er = [SG, SP_1er] ou juste [SG]
-    if (lines[0].values.length >= 1) result.rapG = lines[0].values[0];
-    result._matched = true;
-  }
-  if (arrNums.length >= 2 && lines[1] && lines[1].num === arrNums[1]) {
-    // Ligne du 2e = [ZS, SP_2e]
-    if (lines[1].values.length >= 1) result.rapZS = lines[1].values[0];
-  }
-  if (arrNums.length >= 4 && lines[3] && lines[3].num === arrNums[3]) {
-    // Ligne du 4e = [ZC] (seule valeur car SG/ZS/SP n'existent pas pour le 4e)
-    if (lines[3].values.length >= 1) result.rapZC = lines[3].values[0];
-  }
-
-  // Si l'ordre n'a pas matché (ex : SP a été détecté en plus), on tente une approche différente :
-  // Chercher la ligne dont le numéro correspond à arrNums[0], idem [1], idem [3]
-  if (!result.rapG && arrNums[0]) {
+  // SG = 1ère valeur de la ligne dont le numéro = arrNums[0]
+  // ZS = 1ère valeur de la ligne dont le numéro = arrNums[1] (cette ligne ne contient PAS de SG, donc 1ère valeur = ZS)
+  // ZC = 1ère valeur de la ligne dont le numéro = arrNums[3] (cette ligne ne contient QUE le ZC en général)
+  if (arrNums[0]) {
     const l = lines.find(function (x) { return x.num === arrNums[0]; });
-    if (l && l.values[0]) result.rapG = l.values[0];
+    if (l && l.values[0]) { result.rapG = l.values[0]; result._matched = true; }
   }
-  if (!result.rapZS && arrNums[1]) {
+  if (arrNums[1]) {
     const l = lines.find(function (x) { return x.num === arrNums[1]; });
     if (l && l.values[0]) result.rapZS = l.values[0];
   }
-  if (!result.rapZC && arrNums[3]) {
+  if (arrNums[3]) {
     const l = lines.find(function (x) { return x.num === arrNums[3]; });
     if (l && l.values[0]) result.rapZC = l.values[0];
   }
 
-  result._linesFound = lines;
-  result._zone = zone.slice(0, 300);
   return result;
 }
 
 // ===================== ROUTES =====================
 
 app.get("/", function (req, res) {
-  res.json({ status: "ok", message: "MTURF Robot OK", time: new Date().toISOString(), version: "v6-rapports-text" });
+  res.json({ status: "ok", message: "MTURF Robot OK", time: new Date().toISOString(), version: "v6.1-parser-tolerant" });
 });
 
 app.get("/ping", function (req, res) {
