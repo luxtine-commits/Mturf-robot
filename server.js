@@ -1808,6 +1808,21 @@ app.get("/partants", async function (req, res) {
   }
 });
 
+app.get("/debug/rapports-raw", async function (req, res) {
+  const date = req.query.date, slug = req.query.slug;
+  if (!date || !slug) return res.status(400).json({ status: "error" });
+  const url = BASE + "/fr/course-du-jour/" + date + "/" + slug;
+  try {
+    const html = await fetchHtml(url);
+    const i = html.toUpperCase().indexOf("RAPPORTS");
+    res.json({
+      status: "ok", url: url, idx: i,
+      brut: i < 0 ? "(absent)" : html.slice(i - 300, i + 6000)
+    });
+  } catch (e) {
+    res.status(500).json({ status: "error", message: String(e.message || e) });
+  }
+  });
 app.listen(PORT, function () {
   console.log("Server running on " + PORT + " (v19.0-rapports-complets)");
 });
