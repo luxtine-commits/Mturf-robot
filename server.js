@@ -1813,11 +1813,18 @@ app.get("/debug/rapports-raw", async function (req, res) {
   if (!date || !slug) return res.status(400).json({ status: "error" });
   const url = BASE + "/fr/course-du-jour/" + date + "/" + slug;
   try {
-    const html = await fetchHtml(url);
-    const i = html.toUpperCase().indexOf("RAPPORTS");
+        const html = await fetchHtml(url);
+    const zones = [];
+    let i = -1;
+    while ((i = html.toUpperCase().indexOf("RAPPORTS", i + 1)) >= 0) {
+      const apres = html.slice(i, i + 2500);
+      const euros = (apres.match(/\d+[.,]\d+\s*&euro;|\d+[.,]\d+\s*€/g) || []).length;
+      zones.push({ idx: i, euros: euros });
+    }
+    const bonne = zones.filter(function (z) { return z.euros >= 2; }).pop();
     res.json({
-      status: "ok", url: url, idx: i,
-      brut: i < 0 ? "(absent)" : html.slice(i - 300, i + 6000)
+      status: "ok", url: url, zones: zones,
+      brut: bonne ? html.slice(Math.max(0, bonne.idx - 200), bonne.idx + 4000) : "(aucune zone avec euros)"
     });
   } catch (e) {
     res.status(500).json({ status: "error", message: String(e.message || e) });
